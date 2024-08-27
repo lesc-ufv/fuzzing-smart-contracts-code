@@ -118,3 +118,10 @@ print("Instr Positions:")
 for pc, pos in instr_positions.items():
     print(f"PC: {pc}, Position: {pos}")
 
+#detalhes da saída
+""" pc(contador de programa): a posição da instrução no bytecode.
+begin: a posição inicial da instrução no código-fonte do Solidity.
+end: a posição final da instrução no código-fonte do Solidity.
+name: o nome da instrução.
+source: o índice do arquivo de origem na saída do compilador.
+value: o valor associado à instrução, se houver."""
