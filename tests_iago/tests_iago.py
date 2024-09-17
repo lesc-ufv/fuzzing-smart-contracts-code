@@ -118,6 +118,13 @@ class Fuzzer:
                         }
                         input["global_state"] = {}
                         out = self.instrumented_evm.deploy_transaction(input, int(transaction["gasPrice"]))
+                        if contract_address in self.instrumented_evm.accounts:
+                            self.instrumented_evm.accounts.remove(contract_address)
+
+                        self.env.overall_pcs, self.env.overall_jumpis = get_pcs_and_jumpis(self.instrumented_evm.get_code(to_canonical_address(contract_address)).hex())
+
+                if self.args.abi:
+                    contract_address = self.args.contract
 # # Always deploy the contract (without checking 'to' field)
 #     result = self.instrumented_evm.deploy_contract(transaction['from'], transaction['input'], int(transaction['value']), int(transaction['gas']), int(transaction['gasPrice']))
     
