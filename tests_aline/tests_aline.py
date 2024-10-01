@@ -82,3 +82,4 @@ diferentes partes do seu código ou contrato inteligente.
 Distribuição: A distribuição dos números pode indicar como as instruções estão agrupadas. Um agrupamento denso pode 
 sugerir que essas partes do código estão frequentemente interligadas, enquanto áreas mais dispersas podem indicar seções 
 menos conectadas."""
+# Para conseguir gerar a imagem do CFG,instalar as depencias: pip install matplotlib graphviz pydeps scipy
