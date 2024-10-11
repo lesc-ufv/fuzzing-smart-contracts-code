@@ -88,17 +88,25 @@ def generate_random_inputs(abi, contract_instance):
 
 def simulate_transaction(contract, function_name, inputs=None, value=0):
     try:
+        #saldo inicial antes de qualquer transação
+        initial_balance = contract.functions.balances(w3.eth.default_account).call()
+        print(f'Iniciando transação {function_name} com saldo inicial de: {initial_balance}')
         if inputs:
             # Ordena os inputs de acordo com a ordem dos parâmetros na função
             sorted_inputs = [inputs[param['name']] for param in contract.functions[function_name].abi['inputs']]
+            print(f'Chamada da função {function_name} com parametros {sorted_inputs}')
             txn = getattr(contract.functions, function_name)(*sorted_inputs).transact({'value': value})
         else:
+            print(f'Chamada da função {function_name} sem parametros')
             txn = getattr(contract.functions, function_name)().transact({'value': value})
         tx_receipt = w3.eth.wait_for_transaction_receipt(txn)
-        print(f"Transação {function_name} executada com sucesso: {tx_receipt.transactionHash.hex()}")
+        #apos a execução da transação
+        final_balance = contract.functions.balances(w3.eth.default_account).call()
+        print(f"Transação {function_name} executada com sucesso. Saldo final: {final_balance}")
+        print(f"Hash da transação: {tx_receipt.transactionHash.hex()}")
         return tx_receipt
     except Exception as e:
-        print(f"Erro ao executar a transação {function_name}: {e}")
+        print(f"Error ao executar a transação {function_name}: {e}")
         return None
 
 
@@ -198,7 +206,7 @@ tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
 # Obter o endereço do contrato implantado
 contract_address = tx_receipt['contractAddress']
 print(f"Contrato implantado em: {contract_address}")
-print(f'ABI do contrato {abi}')
+#print(f'ABI do contrato {abi}')
 # Criando uma instância do contrato implantado
 ether_store_contract = w3.eth.contract(address=contract_address, abi=abi)
 
