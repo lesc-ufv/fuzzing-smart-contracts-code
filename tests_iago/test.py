@@ -46,27 +46,66 @@ def plot_cfg(G):
     plt.savefig('grafo_de_controle_de_fluxo.png')
     print("Gráfico gerado: grafo_de_controle_de_fluxo.png")
 
-def generate_random_inputs(abi, contract_instance):
+
+
+#Detecção da reentrancy no contratto
+
+
+def convert_stack_value_to_int(stack_value):
+    if stack_value[0] == int:
+        return stack_value[1]
+    elif stack_value[0] == bytes:
+        return int.from_bytes(stack_value[1], "big")
+    else:
+        raise Exception("Error: Cannot convert stack value to int. Unknown type: " + str(stack_value[0]))
+
+
+#para detecta la, precisamos identificar onde o contrato chama alguma função de transferencia
+#de tokens antes do estado da mesma ser concluida. Para capturarmos essas intruções vamos analisar as instruções do
+#opcode do contrato e analisar os padrões que indicam reentrancy  
+sloads_instructions = {}
+calls_instructions = {}
+def reentrancy_detector(contract_instance, tainted_record,current_instruction,transaction_index,sloads_instructions,calls_instructions):
+    #Monitorar sloads
+    if current_instruction["op"]=="SLOADS":
+        storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
+        sloads_instructions[storage_index] = current_instruction["pc"],transaction_index
+    #Monitorar calls, com valores com mais de 2300 de gas
+    #mais de 2300 gas significa que a chamada tem gas suficiente para realizar operações mais complexas, como reentrar no contrato ou modificar o estado do contrato
+
+    elif current_instruction["op"]=="CALL" and sloads_instructions:
+        gas = convert_stack_value_to_int(current_instruction["stack"][-1])
+        value = convert_stack_value_to_int(current_instruction["stack"][-3])
+        if gas>2300 and(value>0 or tainted_record and tainted_record.stack and tainted_record.stack[-3]):
+            calls_instructions.add(current_instruction["pc"],transaction_index)
+        if gas>2300 and tainted_record and tainted_record.stack() and tainted_record.stack[-2]:
+            calls_instructions.add(current_instruction["pc"],transaction_index)
+            for pc,index in sloads_instructions.values():
+                if pc<current_instruction["pc"]:
+                    return current_instruction["pc"], index
+    elif current_instruction["op"] == "SSTORE" and calls_instructions:
+            if tainted_record and tainted_record.stack and tainted_record.stack[-1]:
+                storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
+                if storage_index in sloads_instructions:
+                    for pc, index in calls_instructions:
+                        if pc < current_instruction["pc"]:
+                            return pc, index
+        
+
+def generate_random_inputs(abi):
     inputs = []
-    for item in abi:
-        if item['type'] == 'function':#Le a ABI e procura pelas funcoes
-            function_inputs = {}
+    for item in abi:#Le a ABI e procura pelas funcoes
+        if item['type'] == 'function' and item['name'] != 'balances':#apenas para o etherstore??
+            function_inputs = dict()
             for input_param in item.get('inputs', []):
                 param_type = input_param['type']
                 if param_type == 'uint256':
-                    if item['name'] == 'withdraw':
-                       # Gera um valor até o saldo disponível para evitar reverts por saldo insuficiente
-                        balance = contract_instance.functions.balances(w3.eth.default_account).call()
-                        if balance > 0:
-                            amount_to_withdraw = random.randint(1, balance)  # Escolhe um valor entre 1 e o saldo
-                            function_inputs[input_param['name']] = amount_to_withdraw
-                        else:
-                            print("Saldo insuficiente para retirar.")
-                            continue  # Se não houver saldo, pula para a próxima função
-                    else:
-                        value = random.randint(0, 2**256 - 1)
-                        function_inputs[input_param['name']] = value
-                        
+                    #balance = contract_instance.functions.balances(w3.eth.default_account).call()
+                    #if balance > 0:
+                    #   amount_to_withdraw = random.randint(1, balance)  # Escolhe um valor entre 1 e o saldo
+                    #    function_inputs[input_param['name']] = amount_to_withdraw
+                    value = random.randint(0, 2**256 - 1)
+                    
                 elif param_type == 'address':
                     value = '0x' + ''.join(random.choices('0123456789abcdef', k=40))
                 elif param_type == 'string':
@@ -81,6 +120,7 @@ def generate_random_inputs(abi, contract_instance):
                 if value is not None:
                     function_inputs[input_param['name']] = value
             inputs.append({
+                'statemutability': item['stateMutability'],
                 'name': item['name'],
                 'inputs': function_inputs
             })
@@ -93,11 +133,12 @@ def simulate_transaction(contract, function_name, inputs=None, value=0):
         print(f'Iniciando transação {function_name} com saldo inicial de: {initial_balance}')
         if inputs:
             # Ordena os inputs de acordo com a ordem dos parâmetros na função
+            
             sorted_inputs = [inputs[param['name']] for param in contract.functions[function_name].abi['inputs']]
-            print(f'Chamada da função {function_name} com parametros {sorted_inputs}')
+            #print(f'Chamada da função {function_name} com parametros {sorted_inputs}')
             txn = getattr(contract.functions, function_name)(*sorted_inputs).transact({'value': value})
         else:
-            print(f'Chamada da função {function_name} sem parametros')
+            #print(f'Chamada da função {function_name} sem parametros')
             txn = getattr(contract.functions, function_name)().transact({'value': value})
         tx_receipt = w3.eth.wait_for_transaction_receipt(txn)
         #apos a execução da transação
@@ -108,24 +149,44 @@ def simulate_transaction(contract, function_name, inputs=None, value=0):
     except Exception as e:
         print(f"Error ao executar a transação {function_name}: {e}")
         return None
+def parse_log(log):
+    # Extraindo informações do log
+    transaction_hash = log.transactionHash.hex()
+    block_number = log.blockNumber
+    address = log.address
+    # Dependendo da ABI do contrato, você pode precisar decodificar os dados do log.
+    # Aqui, estamos apenas pegando o log.raw_data como um exemplo.
+    raw_data = log.data
+    topics = log.topics
+
+    # Criando um dicionário para armazenar os dados relevantes
+    return {
+        'transaction_hash': transaction_hash,
+        'block_number': block_number,
+        'address': address,
+        'data': raw_data,
+        'topics': topics,
+    }
 
 
 
 
 def genetic_fuzzer(abi, contract_instance, generations=10, population_size=5, mutation_rate=0.1):
-    population = [generate_random_inputs(abi, contract_instance) for _ in range(population_size)]
+    population = [generate_random_inputs(abi) for _ in range(population_size)]
     for generation in range(generations):
         print(f"\nGeneration {generation}...")
         for inputs in population:
             for func in inputs:
                 func_name = func['name']
-                func_inputs = func['inputs']
+                func_inputs = func['inputs'] if len(func['inputs']) > 0 else None 
+                func_state = func['stateMutability']
                 value = 0
-                if func_name == 'deposit':
-                    value = random.randint(1, 10**18)  # Deposita entre 1 wei e 1 ether
-                tx_receipt = simulate_transaction(contract_instance, func_name, func_inputs, value)
-                if tx_receipt:
-                    pass
+                
+                if func_state == 'payable':
+                    value = random.randint(1, 10**18)  # Deposit between 1 wei and 1 ether
+                    print(f"Transaction `{func_name}` received random input value: {value}")
+                tx_receipt = simulate_transaction(w3, contract_instance, func_name, func_inputs, value)
+                        
         # Mutação da população
         new_population = []
         for _ in range(population_size):
@@ -212,14 +273,16 @@ ether_store_contract = w3.eth.contract(address=contract_address, abi=abi)
 
 # Opcional: Realizar um depósito inicial para evitar erros de saldo insuficiente
 initial_deposit = 10**18  # 1 Ether
-initial_withdraw= 10**2 # menos q 1 ether, so pra testar a tipagem do withdraw e balance
+#initial_withdraw= 10**2 # menos q 1 ether, so pra testar a tipagem do withdraw e balance
 print("Realizando depósito inicial de 1 Ether...")
 tx_receipt = simulate_transaction(ether_store_contract, 'deposit', {}, initial_deposit)
 if tx_receipt:
     print("Depósito inicial realizado com sucesso.")
-tx_receipt2 = simulate_transaction(ether_store_contract, 'withdraw', {}, initial_withdraw)
-if tx_receipt2:
-    print("Saque inicial realizado com sucesso.")
+#tx_receipt2 = simulate_transaction(ether_store_contract, 'Withdraw', {}, initial_withdraw)
+#if tx_receipt2:
+#    print("Saque inicial realizado com sucesso.")
 
 # Inicia o fuzzing
 genetic_fuzzer(abi, ether_store_contract)  # Inicia o processo de fuzzing
+
+
