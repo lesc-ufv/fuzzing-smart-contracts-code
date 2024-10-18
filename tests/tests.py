@@ -1,6 +1,7 @@
 import solcx
 from web3 import Web3
 import random, pprint
+import json
 
 def compile_smartcontract(compiler_version, contract_filename, source_code):
     if compiler_version not in solcx.get_installed_solc_versions():
@@ -166,8 +167,26 @@ if __name__ == "__main__":
     # Optional step, just for checking
     print("Depositing 1 Ether...")
     tx_receipt = simulate_transaction(w3=w3_conn, contract=ether_store_contract, function_name='deposit', value=Web3.to_wei(1, 'ether'))
-    if tx_receipt is not None:
-        print("Contract balance: {}".format(ether_store_contract.functions.getBalance().call()))
-        genetic_fuzzer(w3_conn, abi, ether_store_contract) # Init Fuzzing proccess
+    
+    # Getting low-level calls information
+    result = w3_conn.manager.request_blocking('debug_traceTransaction', [f"0x{tx_receipt.transactionHash.hex()}"])
+    result = dict(result)
+
+    # Formatting output
+    temp_logs = []
+    for log in result["structLogs"]:
+        temp_log = dict(log)
+        temp_log["storage"] = dict(temp_log["storage"])
+        temp_logs.append(temp_log)
+    result["structLogs"] = temp_logs
+    
+    # Saving low-level calls to .json
+    with open('result.json', 'w') as fp:
+        json.dump(result, fp)
+    print("Low-level calls saved to .json file!")
+    
+    # if tx_receipt is not None:
+    #     print("Contract balance: {}".format(ether_store_contract.functions.getBalance().call()))
+    #     genetic_fuzzer(w3_conn, abi, ether_store_contract) # Init Fuzzing proccess
 
 
