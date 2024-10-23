@@ -59,60 +59,57 @@ def convert_stack_value_to_int(stack_value):
     elif stack_value[0] == bytes:
         return int.from_bytes(stack_value[1], "big")
 
-def reentrancy_detector(contract_instance, tainted_record,current_instruction,transaction_index,sloads_instructions,calls_instructions):
-    #Monitorar sloads
-    if current_instruction["op"]=="SLOAD":
+def reentrancy_detector(contract_instance, tainted_record, current_instruction, transaction_index, sloads_instructions, calls_instructions):
+    
+    if current_instruction["op"] == "SLOAD":
         storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
-        sloads_instructions[storage_index] = current_instruction["pc"],transaction_index
-    #Monitorar calls, com valores com mais de 2300 de gas
-    #mais de 2300 gas significa que a chamada tem gas suficiente para realizar operações mais complexas, como reentrar no contrato ou modificar o estado do contrato
-
-    elif current_instruction["op"]=="CALL" and sloads_instructions:
+        sloads_instructions[storage_index] = (current_instruction["pc"], transaction_index)
+    
+    
+    elif current_instruction["op"] == "CALL" and sloads_instructions:
         gas = convert_stack_value_to_int(current_instruction["stack"][-1])
         value = convert_stack_value_to_int(current_instruction["stack"][-3])
-        if gas>2300 and(value>0 or tainted_record and tainted_record.stack and tainted_record.stack[-3]):
-            calls_instructions.add(current_instruction["pc"],transaction_index)
-        if gas>2300 and tainted_record and tainted_record.stack() and tainted_record.stack[-2]:
-            calls_instructions.add(current_instruction["pc"],transaction_index)
-            for pc,index in sloads_instructions.values():
-                if pc<current_instruction["pc"]:
+        
+        if gas > 2300 and (value > 0 or tainted_record and tainted_record['stack'] and tainted_record['stack'][-3]):
+            calls_instructions.add((current_instruction["pc"], transaction_index))
+        
+        #check the instruction for reentrancy
+        if gas > 2300 and tainted_record and tainted_record['stack'] and tainted_record['stack'][-2]:
+            calls_instructions.add((current_instruction["pc"], transaction_index))
+            for pc, index in sloads_instructions.values():
+                if pc < current_instruction["pc"]:
                     return current_instruction["pc"], index
-    elif current_instruction["op"] == "SSTORE" and calls_instructions:
-            if tainted_record and tainted_record.stack and tainted_record.stack[-1]:
-                storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
-                if storage_index in sloads_instructions:
-                    for pc, index in calls_instructions:
-                        if pc < current_instruction["pc"]:
-                            return pc, index
 
+    #sstore after call, comum reentrancy spot
+    elif current_instruction["op"] == "SSTORE" and calls_instructions:
+        storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
+        
+    
+    if pc is not None and index is not None:
+        return pc, index  #returns reentrancy locals
+
+    return None  #if there is no reentrancy, returns none
 
 
 def simulate_transaction(w3, contract, function_name, inputs=None, value=0):
     try:
         if inputs:
-            # Sorting inputs accordingly with function parameters
             sorted_inputs = [inputs[param['name']] for param in contract.functions[function_name].abi['inputs']]
             txn = getattr(contract.functions, function_name)(*sorted_inputs).transact({'value': value})
         else:
             txn = getattr(contract.functions, function_name)().transact({'value': value})
-        tx_receipt = w3.eth.wait_for_transaction_receipt(txn)
-        #print(f"Transaction '{function_name}' executed successfully: {tx_receipt.transactionHash.hex()}")
         
-        # Analisar a transação para buscar vulnerabilidades de reentrância
+        tx_receipt = w3.eth.wait_for_transaction_receipt(txn)
+        
         tainted_record = {'stack': set(), 'storage': set()}
         sloads_instructions = {}
-        calls_instructions = {}
-
-        # using the debug trace trabsaction to get the low level instructions
-        trace = w3.manager.request_blocking('debug_traceTransaction', [tx_receipt.transactionHash.hex()])
-        
-        for log in trace['structLogs']:
-            print(log) 
-             # Check the instructions
+        calls_instructions = set()
 
         
-        # iterate for the instructions to detect reentrancy
-        for idx, log in enumerate(trace["structLogs"]):
+        low_level_calls = w3.manager.request_blocking('debug_traceTransaction', [tx_receipt.transactionHash.hex()])
+        
+        
+        for idx, log in enumerate(low_level_calls["structLogs"]):
             reentrancy_result = reentrancy_detector(contract, tainted_record, log, idx, sloads_instructions, calls_instructions)
             if reentrancy_result:
                 pc, index = reentrancy_result
@@ -173,11 +170,11 @@ def genetic_fuzzer(w3, abi, contract_instance, generations=10, population_size=5
                 tx_receipt = simulate_transaction(w3, contract_instance, func_name, func_inputs, value)
         
         # Mutation
-      #  new_population = []
-      #  for _ in range(population_size):
-      #      mutated = mutate_inputs(random.choice(population))
-      #      new_population.append(mutated)
-      #   population = new_population
+        new_population = []
+        for _ in range(population_size):
+           mutated = mutate_inputs(random.choice(population))
+           new_population.append(mutated)
+           population = new_population
 
 def mutate_inputs(inputs):
     mutated_inputs = []
@@ -226,20 +223,3 @@ if __name__ == "__main__":
     if tx_receipt is not None:
         print("Contract balance: {}".format(ether_store_contract.functions.getBalance().call()))
         genetic_fuzzer(w3_conn, abi, ether_store_contract) # Init Fuzzing proccess
-    # Getting low-level calls information
-    result = w3_conn.manager.request_blocking('debug_traceTransaction', [f"0x{tx_receipt.transactionHash.hex()}"])
-    result = dict(result)
-
-    # Formatting output
-    temp_logs = []
-    for log in result["structLogs"]:
-        temp_log = dict(log)
-        temp_log["storage"] = dict(temp_log["storage"])
-        temp_logs.append(temp_log)
-    result["structLogs"] = temp_logs
-    
-    # Saving low-level calls to .json
-    with open('result.json', 'w') as fp:
-        json.dump(result, fp)
-    #print("Low-level calls saved to .json file!")
-    
