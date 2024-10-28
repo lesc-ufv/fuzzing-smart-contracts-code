@@ -53,6 +53,13 @@ def get_pcs_and_jumpis(bytecode):
     pcs = [i for i in range(len(bytecode))]
     jumpis = [i for i in range(len(bytecode)) if bytecode[i:i+2] == '56']  # Example: '56' is JUMPI opcode
     return pcs, jumpis
+
+
+def get_pcs(bytecode):
+    pcs = [i for i in range(len(bytecode)//2)]#bytes in hex
+    return pcs
+
+
 def convert_stack_value_to_int(stack_value):
     if stack_value[0] == int:
         return stack_value[1]
@@ -60,6 +67,12 @@ def convert_stack_value_to_int(stack_value):
         return int.from_bytes(stack_value[1], "big")
 
 def reentrancy_detector(contract_instance, tainted_record, current_instruction, transaction_index, sloads_instructions, calls_instructions):
+    
+    pc = current_instruction.get("pc")
+    if pc is None:
+        print(f"Warning: PC is None for transaction index {transaction_index}")
+        return None, None
+    print(f"Current PC: {pc}, Operation: {current_instruction['op']}")#log checking
     
     if current_instruction["op"] == "SLOAD":
         storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
@@ -69,56 +82,66 @@ def reentrancy_detector(contract_instance, tainted_record, current_instruction, 
     elif current_instruction["op"] == "CALL" and sloads_instructions:
         gas = convert_stack_value_to_int(current_instruction["stack"][-1])
         value = convert_stack_value_to_int(current_instruction["stack"][-3])
-        
+        print(current_instruction["stack"][-1],current_instruction["stack"][-3])
+        print(gas,value)
         if gas > 2300 and (value > 0 or tainted_record and tainted_record['stack'] and tainted_record['stack'][-3]):
-            calls_instructions.add((current_instruction["pc"], transaction_index))
+            calls_instructions.add((pc, transaction_index))
         
         #check the instruction for reentrancy
         if gas > 2300 and tainted_record and tainted_record['stack'] and tainted_record['stack'][-2]:
-            calls_instructions.add((current_instruction["pc"], transaction_index))
-            for pc, index in sloads_instructions.values():
-                if pc < current_instruction["pc"]:
-                    return current_instruction["pc"], index
+            calls_instructions.add((pc, transaction_index))
+            for sload_pc, index in sloads_instructions.values():
+                if sload_pc < pc:  # if SLOAD happened before the CALL
+                    print(f"Reentrancy detected: SLOAD at PC {sload_pc} before CALL at PC {pc}")
+                    return pc, index
 
     #sstore after call, comum reentrancy spot
     elif current_instruction["op"] == "SSTORE" and calls_instructions:
         storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
         
     
-    if pc is not None and index is not None:
-        return pc, index  #returns reentrancy locals
+    # clear sloads and calls from previous transactions
+    elif current_instruction["op"] in ["STOP", "RETURN", "REVERT", "ASSERTFAIL", "INVALID", "SUICIDE", "SELFDESTRUCT"]:
+        sloads_instructions.clear()
+        calls_instructions.clear()
+        return None, None
+    return None,None
 
-    return None  #if there is no reentrancy, returns none
+    
 
 
 def simulate_transaction(w3, contract, function_name, inputs=None, value=0):
-    try:
-        if inputs:
-            sorted_inputs = [inputs[param['name']] for param in contract.functions[function_name].abi['inputs']]
-            txn = getattr(contract.functions, function_name)(*sorted_inputs).transact({'value': value})
-        else:
-            txn = getattr(contract.functions, function_name)().transact({'value': value})
-        
-        tx_receipt = w3.eth.wait_for_transaction_receipt(txn)
-        
-        tainted_record = {'stack': set(), 'storage': set()}
-        sloads_instructions = {}
-        calls_instructions = set()
+    
+    if inputs:
+        sorted_inputs = [inputs[param['name']] for param in contract.functions[function_name].abi['inputs']]
+        txn = getattr(contract.functions, function_name)(*sorted_inputs).transact({'value': value})
+    else:
+        txn = getattr(contract.functions, function_name)().transact({'value': value})
+    
+    tx_receipt = w3.eth.wait_for_transaction_receipt(txn)#transaction recepit
+    
+    tainted_record = {'stack': [], 'storage': []}
+    sloads_instructions = {}
+    calls_instructions = set()
 
+    
+    low_level_calls = w3.manager.request_blocking('debug_traceTransaction', [tx_receipt.transactionHash.hex()])
+    
+    
+    #loop through low-level logs
+    for idx, log in enumerate(low_level_calls["structLogs"]):
+        # Call the reentrancy detector for each log
+        pc, index = reentrancy_detector(contract, tainted_record, log, idx, sloads_instructions, calls_instructions)
         
-        low_level_calls = w3.manager.request_blocking('debug_traceTransaction', [tx_receipt.transactionHash.hex()])
-        
-        
-        for idx, log in enumerate(low_level_calls["structLogs"]):
-            reentrancy_result = reentrancy_detector(contract, tainted_record, log, idx, sloads_instructions, calls_instructions)
-            if reentrancy_result:
-                pc, index = reentrancy_result
-                print(f"Reentrancy detected at pc: {pc}, in transaction index: {index}")
-        
-        return tx_receipt
-    except Exception as e:
-        print(f"Error during transaction '{function_name}' execution: {e}")
-        return None
+        #if reentrancy is detected
+        if pc != None and index != None:
+            print(f"Reentrancy detected at PC: {pc}, in transaction index: {index}")
+        else:
+            print('Transaction falied')       
+    #return the transaction receipt
+    return tx_receipt
+    
+    
 
 
 def generate_random_inputs(abi):
@@ -190,7 +213,7 @@ def mutate_inputs(inputs):
                     elif isinstance(value, bool):
                         new_value = not value
                     else:
-                        new_value = value  # Para tipos não suportados
+                        new_value = value  # For non supported types
                     new_func['inputs'][key] = new_value
                     mutated_inputs.append(new_func)
     return mutated_inputs
@@ -219,6 +242,7 @@ if __name__ == "__main__":
     # Optional step, just for checking
     print("Depositing 1 Ether...")
     tx_receipt = simulate_transaction(w3=w3_conn, contract=ether_store_contract, function_name='deposit', value=Web3.to_wei(1, 'ether'))
+
     
     if tx_receipt is not None:
         print("Contract balance: {}".format(ether_store_contract.functions.getBalance().call()))
