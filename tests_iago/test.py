@@ -61,10 +61,14 @@ def get_pcs(bytecode):
 
 
 def convert_stack_value_to_int(stack_value):
-    if stack_value[0] == int:
-        return stack_value[1]
-    elif stack_value[0] == bytes:
-        return int.from_bytes(stack_value[1], "big")
+    try:
+        # as it was always giving string, convert directly to int, without converting it to a hexstring
+        return int(stack_value[1], 0)  # 0 for the 0x
+    except ValueError:
+        print(f"Warning: Could not convert stack value to int: {stack_value[1]}")
+        return 0  
+
+
 
 def reentrancy_detector(contract_instance, tainted_record, current_instruction, transaction_index, sloads_instructions, calls_instructions):
     
@@ -72,17 +76,30 @@ def reentrancy_detector(contract_instance, tainted_record, current_instruction, 
     if pc is None:
         print(f"Warning: PC is None for transaction index {transaction_index}")
         return None, None
-    print(f"Current PC: {pc}, Operation: {current_instruction['op']}")#log checking
+   # print(f"Current PC: {pc}, Operation: {current_instruction['op']}")#log checking
+   # print(current_instruction['op'])
     
     if current_instruction["op"] == "SLOAD":
         storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
+        print(f'storage index: {storage_index}')
         sloads_instructions[storage_index] = (current_instruction["pc"], transaction_index)
+        print(sloads_instructions)
+
     
     
     elif current_instruction["op"] == "CALL" and sloads_instructions:
+        if len(current_instruction["stack"]) >= 3:
+            gas = convert_stack_value_to_int(current_instruction["stack"][-1])
+            value = convert_stack_value_to_int(current_instruction["stack"][-3])
+        else:
+            print(f"Warning: Stack has insufficient elements for CALL at PC {pc}")
+            return None, None
+
         gas = convert_stack_value_to_int(current_instruction["stack"][-1])
         value = convert_stack_value_to_int(current_instruction["stack"][-3])
-        print(current_instruction["stack"][-1],current_instruction["stack"][-3])
+        if(gas) is None:
+            print("Error returning gas is none")
+        
         print(gas,value)
         if gas > 2300 and (value > 0 or tainted_record and tainted_record['stack'] and tainted_record['stack'][-3]):
             calls_instructions.add((pc, transaction_index))
@@ -137,7 +154,7 @@ def simulate_transaction(w3, contract, function_name, inputs=None, value=0):
         if pc != None and index != None:
             print(f"Reentrancy detected at PC: {pc}, in transaction index: {index}")
         else:
-            print('Transaction falied')       
+            print(f'Detection falied. Pc {pc} and {index}')       
     #return the transaction receipt
     return tx_receipt
     
@@ -213,7 +230,7 @@ def mutate_inputs(inputs):
                     elif isinstance(value, bool):
                         new_value = not value
                     else:
-                        new_value = value  # For non supported types
+                        new_value = value  # Para tipos não suportados
                     new_func['inputs'][key] = new_value
                     mutated_inputs.append(new_func)
     return mutated_inputs
