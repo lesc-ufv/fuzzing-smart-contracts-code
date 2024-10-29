@@ -137,7 +137,7 @@ def genetic_fuzzer(w3, abi, contract_instance, sloads, calls, generations=1, pop
                     for i, instruction in enumerate(result.structLogs):
                         pc, index = detect_reentrancy(sloads, calls, instruction, func_name)
                         if pc:
-                            print(f"Detected reentrancy in {func_name}: ", pc, index)
+                            print(f"Detected reentrancy in {func_name}:", pc)
 
 def convert_stack_value_to_int(stack_value):
     stack_value = str.encode(stack_value)
@@ -155,13 +155,10 @@ def detect_reentrancy(sloads, calls, current_instruction, transaction_index):
             sloads[storage_index] = current_instruction["pc"], transaction_index
         # Remember calls with more than 2300 gas and where the value is larger than zero/symbolic or where destination is symbolic
         elif current_instruction["op"] == "CALL" and sloads:
-            gas = convert_stack_value_to_int(current_instruction["stack"][-1])
+            #gas = convert_stack_value_to_int(current_instruction["stack"][-1])
+            gas = current_instruction["gas"]
             value = convert_stack_value_to_int(current_instruction["stack"][-3])
 
-            if transaction_index == 'withdraw':
-                print("CHEGOU AQUI")
-                print(gas, value)
-            
             if gas > 2300 and value > 0:
                 calls.add((current_instruction["pc"], transaction_index))
             if gas > 2300:
