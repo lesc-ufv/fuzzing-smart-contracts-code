@@ -100,7 +100,20 @@ def generate_random_inputs(abi):
 
     return inputs
 
-def genetic_fuzzer(w3, abi, contract_instance, generations=10, population_size=5, mutation_rate=0.1):
+def save_lowlevelcalls(result, out_filename):
+    result = dict(result)
+    # Formatting output
+    temp_logs = []
+    for log in result["structLogs"]:
+        temp_log = dict(log)
+        temp_log["storage"] = dict(temp_log["storage"])
+        temp_logs.append(temp_log)
+    result["structLogs"] = temp_logs
+    # Saving low-level calls to .json
+    with open(out_filename, 'w') as fp:
+        json.dump(result, fp)
+
+def genetic_fuzzer(w3, abi, contract_instance, sloads, calls, generations=1, population_size=1):
     population = [generate_random_inputs(abi) for _ in range(population_size)]
  
     for generation in range(generations):
@@ -116,32 +129,58 @@ def genetic_fuzzer(w3, abi, contract_instance, generations=10, population_size=5
                     value = random.randint(1, 10**18)  # Deposit between 1 wei and 1 ether
                     print(f"Transaction `{func_name}` received random input value: {value}")
                 tx_receipt = simulate_transaction(w3, contract_instance, func_name, func_inputs, value)
-        
-        # Mutação da população
-        # new_population = []
-        # for _ in range(population_size):
-        #     mutated = mutate_inputs(random.choice(population))
-        #     new_population.append(mutated)
-        # population = new_population
+                
+                # Check instructions
+                result = w3.manager.request_blocking('debug_traceTransaction', [f"0x{tx_receipt.transactionHash.hex()}"])
+                #save_lowlevelcalls(result, f"gen{generation}_{func_name}.json")
+                if not result.failed:
+                    for i, instruction in enumerate(result.structLogs):
+                        pc, index = detect_reentrancy(sloads, calls, instruction, func_name)
+                        if pc:
+                            print(f"Detected reentrancy in {func_name}: ", pc, index)
 
-# def mutate_inputs(inputs):
-#     mutated_inputs = []
-#     for func in inputs:
-#         new_func = {'name': func['name'], 'inputs': {}}
-#         for key, value in func['inputs'].items():
-#             if isinstance(value, int):
-#                 new_value = random.randint(0, 2**256 - 1)
-#             elif isinstance(value, str) and value.startswith('0x'):
-#                 new_value = '0x' + ''.join(random.choices('0123456789abcdef', k=len(value) - 2))
-#             elif isinstance(value, str):
-#                 new_value = ''.join(random.choices('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', k=random.randint(5, 15)))
-#             elif isinstance(value, bool):
-#                 new_value = not value
-#             else:
-#                 new_value = value  # Para tipos não suportados
-#             new_func['inputs'][key] = new_value
-#         mutated_inputs.append(new_func)
-#     return mutated_inputs
+def convert_stack_value_to_int(stack_value):
+    stack_value = str.encode(stack_value)
+    if isinstance(stack_value[0], int):
+        return stack_value[1]
+    elif isintance(stack_value[0], bytes):
+        return int.from_bytes(stack_value[1], "big")
+    else:
+        raise Exception("Error: Cannot convert stack value to int. Unknown type: " + str(stack_value[0]))
+
+def detect_reentrancy(sloads, calls, current_instruction, transaction_index):
+        # Remember sloads
+        if current_instruction["op"] == "SLOAD":
+            storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
+            sloads[storage_index] = current_instruction["pc"], transaction_index
+        # Remember calls with more than 2300 gas and where the value is larger than zero/symbolic or where destination is symbolic
+        elif current_instruction["op"] == "CALL" and sloads:
+            gas = convert_stack_value_to_int(current_instruction["stack"][-1])
+            value = convert_stack_value_to_int(current_instruction["stack"][-3])
+
+            if transaction_index == 'withdraw':
+                print("CHEGOU AQUI")
+                print(gas, value)
+            
+            if gas > 2300 and value > 0:
+                calls.add((current_instruction["pc"], transaction_index))
+            if gas > 2300:
+                calls.add((current_instruction["pc"], transaction_index))
+                for pc, index in sloads.values():
+                    if pc < current_instruction["pc"]:
+                        return current_instruction["pc"], index # ENCONTRA REENTRADA AQUI!
+        # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
+        elif current_instruction["op"] == "SSTORE" and calls:
+            storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
+            if storage_index in sloads:
+                for pc, index in calls:
+                    if pc < current_instruction["pc"]:
+                        return pc, index # ENCONTRA REENTRADA AQUI!
+        # Clear sloads and calls from previous transactions
+        elif current_instruction["op"] in ["STOP", "RETURN", "REVERT", "ASSERTFAIL", "INVALID", "SUICIDE", "SELFDESTRUCT"]:
+            sloads = dict()
+            calls = set()
+        return None, None # NÃO FOI ENCONTRADA REENTRADA!
 
 
 if __name__ == "__main__":
@@ -149,6 +188,9 @@ if __name__ == "__main__":
     contract_filename = "EtherStorev2.sol"
     contract_name = "EtherStore"
     solc_version = "0.8.24"
+
+    sloads = dict()
+    calls = set()
 
     with open(contract_filename, 'r') as file:
         source_code = file.read()
@@ -159,7 +201,9 @@ if __name__ == "__main__":
     contract_interface = compiler_output['contracts'][contract_filename][contract_name]
     abi = contract_interface['abi']
     bytecode = contract_interface['evm']['bytecode']['object']
+    deployed_bytecode = contract_interface['evm']['deployedBytecode']['object']
     
+    # Conexão com a blockchain e deploy do contrato
     w3_conn = connect_in_blockchain(blockhain_url)
     if w3_conn is not None:
         ether_store_contract = deploy_smartcontract(w3_conn, abi, bytecode)
@@ -168,25 +212,8 @@ if __name__ == "__main__":
     print("Depositing 1 Ether...")
     tx_receipt = simulate_transaction(w3=w3_conn, contract=ether_store_contract, function_name='deposit', value=Web3.to_wei(1, 'ether'))
     
-    # Getting low-level calls information
-    result = w3_conn.manager.request_blocking('debug_traceTransaction', [f"0x{tx_receipt.transactionHash.hex()}"])
-    result = dict(result)
-
-    # Formatting output
-    temp_logs = []
-    for log in result["structLogs"]:
-        temp_log = dict(log)
-        temp_log["storage"] = dict(temp_log["storage"])
-        temp_logs.append(temp_log)
-    result["structLogs"] = temp_logs
-    
-    # Saving low-level calls to .json
-    with open('result.json', 'w') as fp:
-        json.dump(result, fp)
-    print("Low-level calls saved to .json file!")
-    
-    # if tx_receipt is not None:
-    #     print("Contract balance: {}".format(ether_store_contract.functions.getBalance().call()))
-    #     genetic_fuzzer(w3_conn, abi, ether_store_contract) # Init Fuzzing proccess
+    if tx_receipt is not None:
+        print("Contract balance: {}".format(ether_store_contract.functions.getBalance().call()))
+        genetic_fuzzer(w3_conn, abi, ether_store_contract, sloads, calls) # Init Fuzzing proccess
 
 
