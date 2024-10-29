@@ -139,28 +139,14 @@ def genetic_fuzzer(w3, abi, contract_instance, sloads, calls, generations=1, pop
                         if pc:
                             print(f"Detected reentrancy in {func_name}:", pc)
 
-def convert_stack_value_to_int(stack_value):
-    stack_value = str.encode(stack_value)
-    if isinstance(stack_value[0], int):
-        return stack_value[1]
-    elif isintance(stack_value[0], bytes):
-        return int.from_bytes(stack_value[1], "big")
-    else:
-        raise Exception("Error: Cannot convert stack value to int. Unknown type: " + str(stack_value[0]))
-
 def detect_reentrancy(sloads, calls, current_instruction, transaction_index):
         # Remember sloads
         if current_instruction["op"] == "SLOAD":
-            storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
             sloads[storage_index] = current_instruction["pc"], transaction_index
         # Remember calls with more than 2300 gas and where the value is larger than zero/symbolic or where destination is symbolic
         elif current_instruction["op"] == "CALL" and sloads:
-            #gas = convert_stack_value_to_int(current_instruction["stack"][-1])
             gas = current_instruction["gas"]
-            value = convert_stack_value_to_int(current_instruction["stack"][-3])
 
-            if gas > 2300 and value > 0:
-                calls.add((current_instruction["pc"], transaction_index))
             if gas > 2300:
                 calls.add((current_instruction["pc"], transaction_index))
                 for pc, index in sloads.values():
@@ -168,7 +154,6 @@ def detect_reentrancy(sloads, calls, current_instruction, transaction_index):
                         return current_instruction["pc"], index # ENCONTRA REENTRADA AQUI!
         # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
         elif current_instruction["op"] == "SSTORE" and calls:
-            storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
             if storage_index in sloads:
                 for pc, index in calls:
                     if pc < current_instruction["pc"]:
