@@ -140,29 +140,31 @@ def genetic_fuzzer(w3, abi, contract_instance, sloads, calls, generations=1, pop
                             print(f"Detected reentrancy in {func_name}:", pc)
 
 def detect_reentrancy(sloads, calls, current_instruction, transaction_index):
-        # Remember sloads
-        if current_instruction["op"] == "SLOAD":
-            sloads[storage_index] = current_instruction["pc"], transaction_index
-        # Remember calls with more than 2300 gas and where the value is larger than zero/symbolic or where destination is symbolic
-        elif current_instruction["op"] == "CALL" and sloads:
-            gas = current_instruction["gas"]
+    # Remember sloads
+    if current_instruction["op"] == "SLOAD":
+        storage_index = current_instruction["stack"][-1]
+        sloads[storage_index] = current_instruction["pc"], transaction_index
+    # Remember calls with more than 2300 gas and where the value is larger than zero/symbolic or where destination is symbolic
+    elif current_instruction["op"] == "CALL" and sloads:
+        gas = current_instruction["gas"]
 
-            if gas > 2300:
-                calls.add((current_instruction["pc"], transaction_index))
-                for pc, index in sloads.values():
-                    if pc < current_instruction["pc"]:
-                        return current_instruction["pc"], index # ENCONTRA REENTRADA AQUI!
-        # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
-        elif current_instruction["op"] == "SSTORE" and calls:
-            if storage_index in sloads:
-                for pc, index in calls:
-                    if pc < current_instruction["pc"]:
-                        return pc, index # ENCONTRA REENTRADA AQUI!
-        # Clear sloads and calls from previous transactions
-        elif current_instruction["op"] in ["STOP", "RETURN", "REVERT", "ASSERTFAIL", "INVALID", "SUICIDE", "SELFDESTRUCT"]:
-            sloads = dict()
-            calls = set()
-        return None, None # NÃO FOI ENCONTRADA REENTRADA!
+        if gas > 2300:
+            calls.add((current_instruction["pc"], transaction_index))
+            for pc, index in sloads.values():
+                if pc < current_instruction["pc"]:
+                    return current_instruction["pc"], index # ENCONTRA REENTRADA AQUI!
+    # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
+    elif current_instruction["op"] == "SSTORE" and calls:
+        storage_index = current_instruction["stack"][-1]
+        if storage_index in sloads:
+            for pc, index in calls:
+                if pc < current_instruction["pc"]:
+                    return pc, index # ENCONTRA REENTRADA AQUI!
+    # Clear sloads and calls from previous transactions
+    elif current_instruction["op"] in ["STOP", "RETURN", "REVERT", "ASSERTFAIL", "INVALID", "SUICIDE", "SELFDESTRUCT"]:
+        sloads = dict()
+        calls = set()
+    return None, None # NÃO FOI ENCONTRADA REENTRADA!
 
 
 if __name__ == "__main__":
