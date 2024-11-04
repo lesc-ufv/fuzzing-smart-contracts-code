@@ -29,6 +29,83 @@ def compile_smartcontract(compiler_version, contract_filename, source_code):
     print("Smart contract compiled!")
 
     return compiler_output
+# Classe que carrega o conteúdo do código fonte Solidity
+class Source:
+    def __init__(self, filename):
+        self.filename = filename
+        self.content = self._load_content()
+        self.line_break_positions = self._load_line_break_positions()
+
+    def _load_content(self):
+        with open(self.filename, 'r') as f:
+            content = f.read()
+        return content
+
+    def _load_line_break_positions(self):
+        return [i for i, letter in enumerate(self.content) if letter == '\n']
+
+# Classe que mapeia as posições das instruções do bytecode com o código fonte Solidity
+class SourceMap:
+    position_groups = {}
+    sources = {}
+    compiler_output = None
+
+    def __init__(self, cname, compiler_output):
+        self.cname = cname
+        SourceMap.compiler_output = compiler_output
+        SourceMap.position_groups = self._load_position_groups_standard_json()
+        self.source = self._get_source()
+        self.positions = self._get_positions()
+        self.instr_positions = self._get_instr_positions()
+
+    def _get_instr_positions(self):
+        instr_positions = {}
+        try:
+            filename, contract_name = self.cname.split(":")
+            bytecode = self.compiler_output['contracts'][filename][contract_name]["evm"]["deployedBytecode"]["object"]
+            pcs, jumpis = get_pcs_and_jumpis(bytecode)
+            for j, pc in enumerate(pcs):
+                if j < len(self.positions) and self.positions[j]:
+                    instr_positions[pc] = self.positions[j]
+            return instr_positions
+        except Exception as e:
+            print(f"Erro ao mapear instruções: {e}")
+            return instr_positions
+
+    @classmethod
+    def _load_position_groups_standard_json(cls):
+        return cls.compiler_output["contracts"]
+
+    def _get_positions(self):
+        filename, contract_name = self.cname.split(":")
+        asm = SourceMap.position_groups[filename][contract_name]['evm']['legacyAssembly']['.data']['0']
+        positions = asm['.code']
+        while True:
+            try:
+                positions.append(None)
+                positions += asm['.data']['0']['.code']
+                asm = asm['.data']['0']
+            except KeyError:
+                break
+        return positions
+
+    def _get_source(self):
+        fname = self.get_filename()
+        if fname not in SourceMap.sources:
+            SourceMap.sources[fname] = Source(fname)
+        return SourceMap.sources[fname]
+
+    def get_filename(self):
+        return self.cname.split(":")[0]
+
+    def get_buggy_line(self, pc):
+        try:
+            pos = self.instr_positions[pc]
+        except KeyError:
+            return ""
+        begin = pos['begin']
+        end = pos['end']
+        return self.source.content[begin:end]
 
 def connect_in_blockchain(url):
     w3 = Web3(Web3.HTTPProvider(url))
@@ -54,112 +131,47 @@ def get_pcs_and_jumpis(bytecode):
     jumpis = [i for i in range(len(bytecode)) if bytecode[i:i+2] == '56']  # Example: '56' is JUMPI opcode
     return pcs, jumpis
 
+#code coverage
+def code_coverage(logs):
+    """ Track PCs hit during transaction for code coverage analysis. """
+    covered_pcs = set()
+    for log in logs:
+        if "pc" in log:
+            covered_pcs.add(log["pc"])
+    return covered_pcs
 
-def get_pcs(bytecode):
-    pcs = [i for i in range(len(bytecode)//2)]#bytes in hex
-    return pcs
-
-
-def convert_stack_value_to_int(stack_value):
-    try:
-        # as it was always giving string, convert directly to int, without converting it to a hexstring
-        return int(stack_value[1], 0)  # 0 for the 0x
-    except ValueError:
-        print(f"Warning: Could not convert stack value to int: {stack_value[1]}")
-        return 0  
-
-
-
-def reentrancy_detector(contract_instance, tainted_record, current_instruction, transaction_index, sloads_instructions, calls_instructions):
-    
-    pc = current_instruction.get("pc")
-    if pc is None:
-        print(f"Warning: PC is None for transaction index {transaction_index}")
-        return None, None
-   # print(f"Current PC: {pc}, Operation: {current_instruction['op']}")#log checking
-   # print(current_instruction['op'])
-    
-    if current_instruction["op"] == "SLOAD":
-        storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
-        print(f'storage index: {storage_index}')
-        sloads_instructions[storage_index] = (current_instruction["pc"], transaction_index)
-        print(sloads_instructions)
-
-    
-    
-    elif current_instruction["op"] == "CALL" and sloads_instructions:
-        if len(current_instruction["stack"]) >= 3:
-            gas = convert_stack_value_to_int(current_instruction["stack"][-1])
-            value = convert_stack_value_to_int(current_instruction["stack"][-3])
+def update_coverage(coverage_map, new_coverage):
+    """ Update the coverage map with new transaction coverage """
+    for pc in new_coverage:
+        if pc not in coverage_map:
+            coverage_map[pc] = 1
         else:
-            print(f"Warning: Stack has insufficient elements for CALL at PC {pc}")
-            return None, None
+            coverage_map[pc] += 1
+    return coverage_map
 
-        gas = convert_stack_value_to_int(current_instruction["stack"][-1])
-        value = convert_stack_value_to_int(current_instruction["stack"][-3])
-        if(gas) is None:
-            print("Error returning gas is none")
-        
-        print(gas,value)
-        if gas > 2300 and (value > 0 or tainted_record and tainted_record['stack'] and tainted_record['stack'][-3]):
-            calls_instructions.add((pc, transaction_index))
-        
-        #check the instruction for reentrancy
-        if gas > 2300 and tainted_record and tainted_record['stack'] and tainted_record['stack'][-2]:
-            calls_instructions.add((pc, transaction_index))
-            for sload_pc, index in sloads_instructions.values():
-                if sload_pc < pc:  # if SLOAD happened before the CALL
-                    print(f"Reentrancy detected: SLOAD at PC {sload_pc} before CALL at PC {pc}")
-                    return pc, index
-
-    #sstore after call, comum reentrancy spot
-    elif current_instruction["op"] == "SSTORE" and calls_instructions:
-        storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
-        
-    
-    # clear sloads and calls from previous transactions
-    elif current_instruction["op"] in ["STOP", "RETURN", "REVERT", "ASSERTFAIL", "INVALID", "SUICIDE", "SELFDESTRUCT"]:
-        sloads_instructions.clear()
-        calls_instructions.clear()
-        return None, None
-    return None,None
+def calculate_coverage(coverage_map, total_pcs):
+    """ Calculate percentage of code covered based on unique PCs """
+    unique_pcs_covered = len(coverage_map.keys())
+    coverage_percentage = (unique_pcs_covered / total_pcs) * 100
+    print(f"Current Code Coverage: {coverage_percentage:.2f}%")
+    return coverage_percentage
 
     
-
 
 def simulate_transaction(w3, contract, function_name, inputs=None, value=0):
-    
-    if inputs:
-        sorted_inputs = [inputs[param['name']] for param in contract.functions[function_name].abi['inputs']]
-        txn = getattr(contract.functions, function_name)(*sorted_inputs).transact({'value': value})
-    else:
-        txn = getattr(contract.functions, function_name)().transact({'value': value})
-    
-    tx_receipt = w3.eth.wait_for_transaction_receipt(txn)#transaction recepit
-    
-    tainted_record = {'stack': [], 'storage': []}
-    sloads_instructions = {}
-    calls_instructions = set()
-
-    
-    low_level_calls = w3.manager.request_blocking('debug_traceTransaction', [tx_receipt.transactionHash.hex()])
-    
-    
-    #loop through low-level logs
-    for idx, log in enumerate(low_level_calls["structLogs"]):
-        # Call the reentrancy detector for each log
-        pc, index = reentrancy_detector(contract, tainted_record, log, idx, sloads_instructions, calls_instructions)
-        
-        #if reentrancy is detected
-        if pc != None and index != None:
-            print(f"Reentrancy detected at PC: {pc}, in transaction index: {index}")
+    try:
+        if inputs:
+            # Sorting inputs accordingly with function parameters
+            sorted_inputs = [inputs[param['name']] for param in contract.functions[function_name].abi['inputs']]
+            txn = getattr(contract.functions, function_name)(*sorted_inputs).transact({'value': value})
         else:
-            print(f'Detection falied. Pc {pc} and {index}')       
-    #return the transaction receipt
-    return tx_receipt
-    
-    
-
+            txn = getattr(contract.functions, function_name)().transact({'value': value})
+        tx_receipt = w3.eth.wait_for_transaction_receipt(txn)
+        print(f"Transaction '{function_name}' executed successfully: {tx_receipt.transactionHash.hex()}")
+        return tx_receipt
+    except Exception as e:
+        print(f"Error during transaction '{function_name}' execution: {e}")
+        return None
 
 def generate_random_inputs(abi):
     inputs = []
@@ -192,8 +204,24 @@ def generate_random_inputs(abi):
 
     return inputs
 
-def genetic_fuzzer(w3, abi, contract_instance, generations=10, population_size=5, mutation_rate=0.1):
+def save_lowlevelcalls(result, out_filename):
+    result = dict(result)
+    # Formatting output
+    temp_logs = []
+    for log in result["structLogs"]:
+        temp_log = dict(log)
+        temp_log["storage"] = dict(temp_log["storage"])
+        temp_logs.append(temp_log)
+    result["structLogs"] = temp_logs
+    # Saving low-level calls to .json
+    with open(out_filename, 'w') as fp:
+        json.dump(result, fp)
+
+def genetic_fuzzer(w3, abi, contract_instance, sloads, calls,source_map, generations=10, population_size=10):
     population = [generate_random_inputs(abi) for _ in range(population_size)]
+    coverage_map = {}
+    total_pcs = len(source_map.instr_positions)#all contract pcs
+
  
     for generation in range(generations):
         print(f"\nGeneration {generation}...")
@@ -208,39 +236,64 @@ def genetic_fuzzer(w3, abi, contract_instance, generations=10, population_size=5
                     value = random.randint(1, 10**18)  # Deposit between 1 wei and 1 ether
                     print(f"Transaction `{func_name}` received random input value: {value}")
                 tx_receipt = simulate_transaction(w3, contract_instance, func_name, func_inputs, value)
-        
-        # Mutation
-        new_population = []
-        for _ in range(population_size):
-           mutated = mutate_inputs(random.choice(population))
-           new_population.append(mutated)
-           population = new_population
+                
+                # Check instructions
+                result = w3.manager.request_blocking('debug_traceTransaction', [f"0x{tx_receipt.transactionHash.hex()}"])
+                logs = result["structLogs"] if "structLogs" in result else []
+                new_coverage = code_coverage(logs)
+                update_coverage(coverage_map, new_coverage)
+                    
+                save_lowlevelcalls(result, f"gen{generation}_{func_name}.json")
+                if not result.failed:
+                    for i, instruction in enumerate(result.structLogs):
+                        pc = detect_reentrancy(sloads, calls, instruction)
+                        if pc:
+                            print(f"Detected reentrancy in {func_name}:", pc)
+        #calculate the coverage from all the code
+        calculate_coverage(coverage_map, total_pcs)
+def detect_reentrancy(sloads, calls, current_instruction):
+    # Remember sloads
+    if current_instruction["op"] == "SLOAD":
+        storage_index = current_instruction["stack"][-1]
+        sloads[storage_index] = current_instruction["pc"]
+    # Remember calls with more than 2300 gas and where the value is larger than zero/symbolic or where destination is symbolic
+    elif current_instruction["op"] == "CALL" and sloads:
+        gas = int(current_instruction["stack"][-1], 16) # Gas da instrucao
+        value = int(current_instruction["stack"][-3], 16) # Saldo atual do contrato
 
-def mutate_inputs(inputs):
-    mutated_inputs = []
-    for func in inputs:
-        new_func = {'name': func['name'], 'inputs': {}}
-        for key, value in func['inputs'].items():
-                    if isinstance(value, int):
-                        new_value = random.randint(0, 2**256 - 1)
-                    elif isinstance(value, str) and value.startswith('0x'):
-                        new_value = '0x' + ''.join(random.choices('0123456789abcdef', k=len(value) - 2))
-                    elif isinstance(value, str):
-                        new_value = ''.join(random.choices('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', k=random.randint(5, 15)))
-                    elif isinstance(value, bool):
-                        new_value = not value
-                    else:
-                        new_value = value  # Para tipos não suportados
-                    new_func['inputs'][key] = new_value
-                    mutated_inputs.append(new_func)
-    return mutated_inputs
+        if gas > 2300 and value > 0:
+            calls.add(current_instruction["pc"])
+            for pc in sloads.values():
+                if pc < current_instruction["pc"]:
+                    return current_instruction["pc"] # ENCONTRA REENTRADA AQUI!
+    # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
+    elif current_instruction["op"] == "SSTORE" and calls:
+        storage_index = current_instruction["stack"][-1]
+        if storage_index in sloads:
+            for pc in calls:
+                if pc < current_instruction["pc"]:
+                    return pc # ENCONTRA REENTRADA AQUI!
+    # Clear sloads and calls from previous transactions
+    elif current_instruction["op"] in ["STOP", "RETURN", "REVERT", "ASSERTFAIL", "INVALID", "SUICIDE", "SELFDESTRUCT"]:
+        sloads = dict()
+        calls = set()
+    return None # NÃO FOI ENCONTRADA REENTRADA!
 
+def save_source_map(compiler_output, contract_filename, contract_name, out_filename):
+    source_map = compiler_output['contracts'][contract_filename][contract_name]['evm']['deployedBytecode'].get('sourceMap', '')
+    
+    # saves the sourcemap in a json file
+    with open(out_filename, 'w') as file:
+        json.dump({"sourceMap": source_map}, file, indent=4)
 
 if __name__ == "__main__":
     blockhain_url = "http://127.0.0.1:8545"
     contract_filename = "EtherStore.sol"
     contract_name = "EtherStore"
     solc_version = "0.8.24"
+
+    sloads = dict()
+    calls = set()
 
     with open(contract_filename, 'r') as file:
         source_code = file.read()
@@ -251,7 +304,9 @@ if __name__ == "__main__":
     contract_interface = compiler_output['contracts'][contract_filename][contract_name]
     abi = contract_interface['abi']
     bytecode = contract_interface['evm']['bytecode']['object']
+    deployed_bytecode = contract_interface['evm']['deployedBytecode']['object']
     
+    # Connection and deploy
     w3_conn = connect_in_blockchain(blockhain_url)
     if w3_conn is not None:
         ether_store_contract = deploy_smartcontract(w3_conn, abi, bytecode)
@@ -260,7 +315,9 @@ if __name__ == "__main__":
     print("Depositing 1 Ether...")
     tx_receipt = simulate_transaction(w3=w3_conn, contract=ether_store_contract, function_name='deposit', value=Web3.to_wei(1, 'ether'))
 
-    
+    source_map = SourceMap(f"{contract_filename}:{contract_name}", compiler_output)
+    save_source_map(compiler_output, contract_filename, contract_name, 'source_map.json')
     if tx_receipt is not None:
         print("Contract balance: {}".format(ether_store_contract.functions.getBalance().call()))
-        genetic_fuzzer(w3_conn, abi, ether_store_contract) # Init Fuzzing proccess
+        genetic_fuzzer(w3_conn, abi, ether_store_contract, sloads, calls,source_map) # Init Fuzzing proccess
+
